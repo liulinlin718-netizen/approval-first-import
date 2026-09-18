@@ -1,0 +1,15 @@
+{
+  "name": "approval-first-import",
+  "version": "0.1.0",
+  "description": "Offline, content-bound approval before saving an untrusted Skill or MCP import.",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/liulinlin718-netizen/approval-first-import.git" },
+  "homepage": "https://github.com/liulinlin718-netizen/approval-first-import#readme",
+  "bugs": { "url": "https://github.com/liulinlin718-netizen/approval-first-import/issues" },
+  "engines": { "node": ">=22" },
+  "exports": { ".": { "types": "./src/index.d.ts", "import": "./src/index.js" } },
+  "bin": { "approval-first-import": "./bin/approval-first-import.js" },
+  "files": ["src/", "bin/", "examples/", "README.md", "LICENSE", "NOTICE"],
+  "scripts": { "test": "node --test", "demo": "node bin/approval-first-import.js demo" }
+}

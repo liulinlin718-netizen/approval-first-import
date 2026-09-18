@@ -1,0 +1,17 @@
+Approval-First Import
+
+Origin: extracted as a standalone implementation from the first-party TAgent
+design for Skill/MCP import previews and explicit tool approvals (2026).
+Relevant design sources: import-safety.ts, skill-import.ts, mcp-import.ts,
+and approvals.ts in TAgent's server source.
+
+This directory contains a framework-independent implementation and synthetic
+examples. It has no runtime dependencies on TAgent, Hono, MCP SDKs, external
+registries, model providers, or package managers. No third-party project source,
+user conversations, runtime state, API keys, or downloaded package contents are
+included. The MIT license in this directory applies to this standalone code;
+it does not relicense the rest of TAgent or any imported third-party package.
+
+Source repository: https://github.com/liulinlin718-netizen/approval-first-import
+The package has not been published to npm. Examples use reserved example.org
+addresses and do not contact them.

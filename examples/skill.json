@@ -1,0 +1,10 @@
+{
+  "kind": "skill",
+  "name": "Meeting handoff",
+  "source": { "url": "https://example.org/meeting-handoff", "revision": "synthetic-v1" },
+  "destination": "skills/meeting-handoff",
+  "files": [
+    { "path": "SKILL.md", "content": "# Meeting handoff\nList decisions, owners, unknowns and next steps. Do not invent missing owners." },
+    { "path": "templates/handoff.md", "content": "## Decisions\n## Owners\n## Unknowns\n## Next steps" }
+  ]
+}
