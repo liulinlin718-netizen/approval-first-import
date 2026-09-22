@@ -1,36 +1,44 @@
 # Approval-First Import
 
-Approval-First Import is a zero-dependency Node.js library for reviewing an untrusted Skill or MCP configuration before an application saves it.
+[中文](./README.md) | [English](./README_EN.md)
 
-It provides a content-bound approval gate with redacted previews, risk findings, expiration, scope binding, and single-use confirmation. Search results do not become drafts automatically, previews do not write files, and saved configurations are never executed by this package.
+Approval-First Import 是一个零依赖的 Node.js 库，用于在应用保存不受信任的 Skill 或 MCP 配置前建立明确、可审计的用户确认门。它提供内容绑定的审批、脱敏预览、风险提示、有效期、作用域绑定和单次确认。
 
-```text
-Discovery candidate
-  → trusted host fetches and pins exact content
-  → redacted preview + risk findings
-  → authenticated user confirmation
-  → same content, same scope, still valid?
-  → host records the decision and saves atomically
+项目解决的核心问题不是“怎样安装得更快”，而是“怎样让用户在保存外部能力前真正知道将发生什么”。搜索结果不会自动变成草稿，预览不会写入文件，保存后的配置也不会被本库执行。
 
-Execution remains a separate operation and authorization.
+## 适用场景
+
+第三方 Agent 能力导入跨越了多个信任边界：
+
+- 搜索元数据不等于可安装配置。
+- 预览不等于用户同意。
+- 同意应绑定到确定内容和作用域，而不是可能变化的 URL。
+- 保存配置不等于授权执行命令。
+- 高风险命令需要额外确认。
+- 保存失败或状态不明时，旧审批不能被自动重放。
+
+Approval-First Import 把这些边界固化为宿主应用可复用的状态机。
+
+## 安全流程
+
+```mermaid
+flowchart LR
+    A[发现候选] --> B[宿主安全抓取并固定内容]
+    B --> C[脱敏预览与风险扫描]
+    C --> D{用户明确确认}
+    D -->|拒绝 / 过期| E[不写入]
+    D -->|同意| F[核对内容、作用域与指纹]
+    F --> G[宿主原子保存]
+    G -. 独立授权 .-> H[后续执行]
 ```
 
-## Why Use It
+执行始终是单独的操作和授权，本库不会运行外部命令。
 
-Importing third-party Agent capabilities crosses several trust boundaries. A useful approval flow should make these distinctions explicit:
+## 快速开始
 
-- Discovery metadata is not an installable configuration.
-- A preview is not consent.
-- Consent applies to exact content and scope, not a mutable URL.
-- Saving configuration is not permission to execute it.
-- High-risk commands require an additional acknowledgement.
-- A failed or ambiguous save must not be retried automatically with the old approval.
+要求 Node.js 22 或更高版本。无需安装依赖、配置模型密钥、访问网络或构建。
 
-## Quick Start
-
-Requires Node.js 22 or newer. No dependency installation, model key, network access, or build step is required.
-
-```sh
+```bash
 git clone https://github.com/liulinlin718-netizen/approval-first-import.git
 cd approval-first-import
 
@@ -39,9 +47,9 @@ node bin/approval-first-import.js preview examples/skill.json
 node bin/approval-first-import.js preview examples/mcp-high-risk.json
 ```
 
-The CLI prints previews only. It does not expose a save, install, confirm, or shell command. Use the library inside a trusted backend for the full confirmation flow.
+CLI 只输出预览，不提供保存、安装、确认或 shell 命令。完整确认流程应集成在可信后端中。
 
-## Integration
+## 集成示例
 
 ```js
 import { ImportApprovalGate } from './src/index.js';
@@ -51,7 +59,7 @@ const gate = new ImportApprovalGate({
   recordDecision: async decision => auditStore.append(decision),
 });
 
-// Build this draft in trusted host code after safely fetching pinned content.
+// 由可信宿主在安全抓取并固定内容后构建。
 const draft = {
   kind: 'mcp',
   name: 'Notes',
@@ -68,8 +76,7 @@ const draft = {
 const scope = `${authenticatedUser.id}:${workspace.id}`;
 const preview = gate.preview(draft, { scope });
 
-// Send only the redacted preview to the UI. Keep the original draft on the host.
-
+// 仅将脱敏预览发送到 UI，原始 draft 留在服务端。
 const receipt = await gate.confirmAndSave({
   previewId: preview.previewId,
   fingerprint: preview.fingerprint,
@@ -82,11 +89,11 @@ const receipt = await gate.confirmAndSave({
 });
 ```
 
-Authentication, CSRF protection, the audit store, content fetching, and atomic persistence belong to the host application. A model-generated `confirmed: true` is not human consent.
+身份认证、CSRF 防护、审计存储、内容抓取与原子持久化由宿主应用负责。模型生成的 `confirmed: true` 不代表人类同意。
 
-## Safety Contract
+## 安全契约
 
-Every preview includes these literal values:
+每个预览固定包含：
 
 ```json
 {
@@ -96,40 +103,32 @@ Every preview includes these literal values:
 }
 ```
 
-The gate binds approval to:
+审批会绑定规范化候选内容、来源 URL 与固定 revision、目标文件、结构化命令、隐藏的环境变量与请求头、用户/工作区作用域、预览有效期和单次状态。任何关键变化都会使旧审批失效。
 
-- the normalized Skill/MCP candidate
-- source URL and pinned revision
-- destination and file contents
-- structured command descriptions
-- hidden environment and header values
-- user/workspace scope
-- preview lifetime and one-time state
+保存回调获得的是冻结的原始候选，而不是从公开预览反向拼装的对象。
 
-Any meaningful change invalidates the old approval. The save callback receives the frozen original candidate, not an object reconstructed from the public preview.
+## 公开 API
 
-## Public API
-
-| Operation | Purpose |
+| 操作 | 作用 |
 | --- | --- |
-| `discoveryCandidate(input)` | Validate discovery metadata only; never fetch or construct commands. |
-| `new ImportApprovalGate(options?)` | Create a bounded in-memory approval registry. |
-| `gate.preview(candidate, { scope })` | Create a frozen redacted preview and content fingerprint. |
-| `gate.confirmAndSave(request, save)` | Validate consent, content, scope, expiry, and risk acknowledgement before one save callback. |
-| `gate.status(previewId, { scope })` | Read the current state of a preview in this gate. |
-| `gate.revoke(previewId, { scope })` | Revoke a pending approval. |
+| `discoveryCandidate(input)` | 只校验发现元数据，不抓取内容、不构造命令。 |
+| `new ImportApprovalGate(options?)` | 创建有边界的内存审批注册表。 |
+| `gate.preview(candidate, { scope })` | 创建冻结的脱敏预览和内容指纹。 |
+| `gate.confirmAndSave(request, save)` | 核对同意、内容、作用域、有效期和风险确认后调用一次保存。 |
+| `gate.status(previewId, { scope })` | 查询当前审批状态。 |
+| `gate.revoke(previewId, { scope })` | 撤销待确认审批。 |
 
-Supported candidates include multi-file text Skills and MCP configurations using structured stdio commands or HTTP/SSE endpoints. Unknown fields, accessors, cycles, prototype keys, oversized values, and unsafe portable destinations are rejected.
+候选支持多文件文本 Skill，以及使用结构化 stdio 命令或 HTTP/SSE 端点的 MCP 配置。未知字段、访问器、循环引用、原型键、超大值和不安全的可移植目标路径会被拒绝。
 
-## Redaction and Risk Findings
+## 脱敏与风险提示
 
-The public preview hides environment and header values, URL query values and fragments, known credential arguments, bearer values, and credential-like file contents. Empty required values are shown as `[REQUIRED]`.
+公开预览会隐藏环境变量和请求头值、URL 查询参数和 fragment、常见凭据参数、Bearer 值及疑似凭据文件内容；空的必填值显示为 `[REQUIRED]`。
 
-Risk findings cover command declarations, shell or inline-code execution, remote-script pipes, destructive commands, lifecycle scripts, privilege changes, and executable-looking resources. All external imports start at least at `medium`; `high` requires additional acknowledgement but still does not permit execution.
+风险扫描覆盖命令声明、shell/内联代码、远程脚本管道、破坏性命令、生命周期脚本、权限变更和可执行资源。所有外部导入至少为 `medium` 风险；`high` 需要额外确认，但仍不会授予执行权限。
 
-Redaction is deliberately conservative, but it is not a complete secret scanner or malicious-code detector. Render imported content as text, never as trusted HTML.
+脱敏是保守防线，不是完整密钥扫描器或恶意代码检测器。导入内容应始终按文本渲染，不能作为可信 HTML。
 
-## State Model
+## 状态模型与宿主责任
 
 ```text
 pending → confirming → saving → saved
@@ -138,32 +137,20 @@ pending → confirming → saving → saved
    └→ expired / revoked
 ```
 
-Concurrent confirmations cannot invoke the host save callback twice. A failed save consumes the approval because a partial write may have occurred. There is no automatic retry or rollback.
+并发确认不能重复调用保存回调。保存失败会消耗审批，因为可能已经发生部分写入；系统不自动重试或回滚。
 
-## Host Responsibilities
+本库不提供身份认证、包发现、SSRF 防护、沙箱、文件系统隔离、业务 schema 校验、不可变审计存储或命令执行。宿主必须固定并保留预览过的字节、限制网络和目标目录、原子保存，并对后续 MCP/脚本执行单独授权。
 
-This library does not provide authentication, package discovery, SSRF protection, sandboxing, filesystem isolation, schema verification, immutable audit storage, or command execution.
+审批状态保存在进程内。重启后必须重新预览；持久化审计记录不能恢复为有效权限。
 
-The host must:
+## 测试与贡献
 
-- fetch remote content through its own network policy
-- pin and retain the exact bytes shown in the preview
-- validate package-specific schemas
-- map destinations under an allowed root and resolve symlinks safely
-- persist atomically and make save handling idempotent
-- authorize any later MCP or script execution separately
-- use shared transactional storage if approvals span multiple workers
-
-Approvals are process-local. Restarting the gate requires a new preview; persisted audit records must never recreate live permission.
-
-## Tests
-
-```sh
+```bash
 node --test
 ```
 
-Tests use synthetic local fixtures and do not perform network requests, model calls, package installation, or tool execution.
+测试只使用本地合成夹具，不访问网络、不调用模型、不安装包，也不执行工具。欢迎通过 [Issues](https://github.com/liulinlin718-netizen/approval-first-import/issues) 提交可复现问题和安全边界建议。
 
-## License
+## 许可
 
-MIT. This package was extracted from TAgent's separation of discovery, import preview, explicit confirmation, and execution authorization. See [NOTICE](./NOTICE) for provenance.
+[MIT License](./LICENSE)。本项目提取自 TAgent 对“发现、导入预览、明确确认和执行授权”的分离设计；来源说明见 [NOTICE](./NOTICE)。
