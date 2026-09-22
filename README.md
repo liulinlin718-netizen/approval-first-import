@@ -1,138 +1,169 @@
 # Approval-First Import
 
-A small, zero-dependency Node.js library for **reviewing a Skill/MCP import before saving its configuration**.
+Approval-First Import is a zero-dependency Node.js library for reviewing an untrusted Skill or MCP configuration before an application saves it.
 
-[Source repository](https://github.com/liulinlin718-netizen/approval-first-import) | [Issue tracker](https://github.com/liulinlin718-netizen/approval-first-import/issues)
-
-An import button should not silently turn a search result into an installation. This package gives application authors a bounded approval gate with redacted previews, content binding, expiration and single-use confirmation. It does not download packages or execute commands.
+It provides a content-bound approval gate with redacted previews, risk findings, expiration, scope binding, and single-use confirmation. Search results do not become drafts automatically, previews do not write files, and saved configurations are never executed by this package.
 
 ```text
-Discovery metadata -> Host fetches a pinned draft -> Redacted preview
-                                                     |
-                                             Explicit confirmation
-                                                     |
-                                  Same content + same scope + not expired?
-                                                     |
-                                    Host records decision, then saves
+Discovery candidate
+  → trusted host fetches and pins exact content
+  → redacted preview + risk findings
+  → authenticated user confirmation
+  → same content, same scope, still valid?
+  → host records the decision and saves atomically
 
-Running the imported tool is a separate operation and authorization.
+Execution remains a separate operation and authorization.
 ```
 
-## Run locally
+## Why Use It
 
-Node.js 22 or later. No installation, model key, network access or build step is needed:
+Importing third-party Agent capabilities crosses several trust boundaries. A useful approval flow should make these distinctions explicit:
+
+- Discovery metadata is not an installable configuration.
+- A preview is not consent.
+- Consent applies to exact content and scope, not a mutable URL.
+- Saving configuration is not permission to execute it.
+- High-risk commands require an additional acknowledgement.
+- A failed or ambiguous save must not be retried automatically with the old approval.
+
+## Quick Start
+
+Requires Node.js 22 or newer. No dependency installation, model key, network access, or build step is required.
 
 ```sh
 git clone https://github.com/liulinlin718-netizen/approval-first-import.git
 cd approval-first-import
-node --test
+
 node bin/approval-first-import.js demo
 node bin/approval-first-import.js preview examples/skill.json
 node bin/approval-first-import.js preview examples/mcp-high-risk.json
 ```
 
-The demo uses synthetic credentials and an in-memory save callback. The CLI only prints JSON; it has no install, confirm, shell or save command. A CLI preview cannot be confirmed in a later process. Use the library inside your application's trusted backend for that workflow.
+The CLI prints previews only. It does not expose a save, install, confirm, or shell command. Use the library inside a trusted backend for the full confirmation flow.
 
-This directory is self-contained and can be extracted without the TAgent workspace. It includes ESM exports, TypeScript declarations, MIT licensing and Node built-in tests. It has **not** been published to npm.
-
-## Small integration
+## Integration
 
 ```js
 import { ImportApprovalGate } from './src/index.js';
 
 const gate = new ImportApprovalGate({
   ttlMs: 5 * 60_000,
-  // Optional durable audit hook. A rejection prevents the save callback.
   recordDecision: async decision => auditStore.append(decision),
 });
 
-// Both scope and draft are derived by the trusted host, not the model.
-const scope = `${authenticatedUser.id}:${workspace.id}`;
+// Build this draft in trusted host code after safely fetching pinned content.
 const draft = {
   kind: 'mcp',
   name: 'Notes',
-  source: { url: 'https://example.org/notes', revision: 'pinned-revision' },
+  source: {
+    url: 'https://example.org/notes',
+    revision: 'pinned-revision',
+  },
   destination: 'config/notes.json',
   transport: 'stdio',
   commands: [{ executable: 'node', args: ['notes-server.mjs'] }],
   env: { NOTES_TOKEN: 'user-supplied-value' },
 };
-const preview = gate.preview(draft, { scope });
-// Return preview to your UI. Show files, commands, destinations and risk findings.
-// Keep the unredacted draft on the host; do not reconstruct it from the preview.
 
-// In a separate, authenticated user-confirmation handler:
+const scope = `${authenticatedUser.id}:${workspace.id}`;
+const preview = gate.preview(draft, { scope });
+
+// Send only the redacted preview to the UI. Keep the original draft on the host.
+
 const receipt = await gate.confirmAndSave({
   previewId: preview.previewId,
   fingerprint: preview.fingerprint,
   scope,
-  candidate: currentDraft,       // The current host-owned draft, including secrets.
+  candidate: currentHostDraft,
   confirmed: userForm.confirmed === true,
   acknowledgeHighRisk: userForm.acknowledgeHighRisk === true,
 }, async (approved, decision) => {
-  // Application-supplied, save-only operation; never pass this data to a shell.
   return configStore.saveAtomically(decision.previewId, approved);
 });
 ```
 
-`auditStore`, authentication, forms and `configStore` above are host application services, not included globals. The runnable CLI demo shows the same flow without these services. A model-generated `confirmed: true` is **not** human consent: only your authenticated user action should reach this handler. Protect it against CSRF where applicable.
+Authentication, CSRF protection, the audit store, content fetching, and atomic persistence belong to the host application. A model-generated `confirmed: true` is not human consent.
 
-The callback receives the frozen, normalized original candidate, not an object submitted after an asynchronous wait. Any meaningful change to the current draft, including hidden environment values, source revision, file contents or destination, invalidates the old approval. Object key order, omitted empty collections and surrounding name whitespace are normalized.
+## Safety Contract
 
-## API
-
-| Operation | Responsibility |
-| --- | --- |
-| `discoveryCandidate({name, kind, url, provider})` | Validates metadata only. Does not search, construct commands or make a draft. |
-| `new ImportApprovalGate(options?)` | Creates a bounded in-memory approval registry. |
-| `gate.preview(candidate, {scope})` | Produces a frozen redacted view and opaque content fingerprint; no writes. |
-| `gate.confirmAndSave(request, save)` | Validates explicit consent, scope, content, risk acknowledgement and expiry; then invokes the host callback once. |
-| `gate.status(previewId, {scope})` | Reports current state within this gate instance. |
-| `gate.revoke(previewId, {scope})` | Revokes a pending confirmation, including one awaiting the audit hook. |
-
-Every preview has these literal values:
+Every preview includes these literal values:
 
 ```json
-{ "requiresConfirmation": true, "willWrite": false, "willExecute": false }
+{
+  "requiresConfirmation": true,
+  "willWrite": false,
+  "willExecute": false
+}
 ```
 
-Commands use structured `executable` and `args` descriptions. There is no executable shell command string API. Skill imports support multiple text files. MCP imports support `stdio` descriptions or HTTP/SSE endpoint configuration. Unknown fields, accessors, cycles and prototype keys are rejected rather than silently discarded.
+The gate binds approval to:
 
-Defaults: a 5-minute TTL, at most 64 active entries, at most 512 KiB input, 64 text files, 128 KiB per file and 16 command descriptions. Maximum configurable TTL is one hour. There is no truncated-preview approval path; oversized input is rejected. Binary archives and arbitrary MCP configuration schemas are outside this package.
+- the normalized Skill/MCP candidate
+- source URL and pinned revision
+- destination and file contents
+- structured command descriptions
+- hidden environment and header values
+- user/workspace scope
+- preview lifetime and one-time state
 
-States:
+Any meaningful change invalidates the old approval. The save callback receives the frozen original candidate, not an object reconstructed from the public preview.
+
+## Public API
+
+| Operation | Purpose |
+| --- | --- |
+| `discoveryCandidate(input)` | Validate discovery metadata only; never fetch or construct commands. |
+| `new ImportApprovalGate(options?)` | Create a bounded in-memory approval registry. |
+| `gate.preview(candidate, { scope })` | Create a frozen redacted preview and content fingerprint. |
+| `gate.confirmAndSave(request, save)` | Validate consent, content, scope, expiry, and risk acknowledgement before one save callback. |
+| `gate.status(previewId, { scope })` | Read the current state of a preview in this gate. |
+| `gate.revoke(previewId, { scope })` | Revoke a pending approval. |
+
+Supported candidates include multi-file text Skills and MCP configurations using structured stdio commands or HTTP/SSE endpoints. Unknown fields, accessors, cycles, prototype keys, oversized values, and unsafe portable destinations are rejected.
+
+## Redaction and Risk Findings
+
+The public preview hides environment and header values, URL query values and fragments, known credential arguments, bearer values, and credential-like file contents. Empty required values are shown as `[REQUIRED]`.
+
+Risk findings cover command declarations, shell or inline-code execution, remote-script pipes, destructive commands, lifecycle scripts, privilege changes, and executable-looking resources. All external imports start at least at `medium`; `high` requires additional acknowledgement but still does not permit execution.
+
+Redaction is deliberately conservative, but it is not a complete secret scanner or malicious-code detector. Render imported content as text, never as trusted HTML.
+
+## State Model
 
 ```text
-pending -> confirming -> saving -> saved
-   |           |            |
-expired     expired        failed
-revoked     revoked
-            failed (decision could not be recorded)
+pending → confirming → saving → saved
+   │           │           └→ failed
+   │           ├→ expired / revoked / failed
+   └→ expired / revoked
 ```
 
-Concurrent confirmations cannot call the host twice. A failed save consumes the approval because it may have partially written. There is no automatic retry or rollback. Expiry/revocation is checked again after the audit hook and before saving. Once a save callback has started, expiration cannot undo it.
+Concurrent confirmations cannot invoke the host save callback twice. A failed save consumes the approval because a partial write may have occurred. There is no automatic retry or rollback.
 
-Common `ApprovalError.code` values: `invalid_input`, `invalid_scope`, `capacity`, `not_found`, `confirmation_required`, `content_changed`, `risk_acknowledgement_required`, `expired`, `consumed`, `revoked`, `record_failed`, `save_failed`.
+## Host Responsibilities
 
-## Redaction and risk
+This library does not provide authentication, package discovery, SSRF protection, sandboxing, filesystem isolation, schema verification, immutable audit storage, or command execution.
 
-- All environment/header values are hidden, not only those named `TOKEN`. Empty/null values display `[REQUIRED]`.
-- URL query values/fragments, known secret argument values, common inline credential assignments, bearer values and credential-like files are hidden. Preview URLs are display data; keep original URLs separately on the host.
-- Fingerprints are keyed HMACs scoped to the gate instance and user/workspace scope. They are not portable public hashes of low-entropy secrets and are not execution tokens.
-- Risk checks warn about shell/inline code, remote script pipes, destructive commands, lifecycle scripts, privilege changes and executable-looking resources.
-- All external content starts at `medium`, not a green "safe" label. `high` requires an additional acknowledgement, but does **not** grant permission to run anything.
-- General secret detection and malicious-code detection are unsolved here. Unlabelled or encoded secrets may remain in arbitrary file text; do not feed real production secrets into untrusted package material or log raw drafts. Render all imported text as text, never HTML.
+The host must:
 
-## Explicit limits
+- fetch remote content through its own network policy
+- pin and retain the exact bytes shown in the preview
+- validate package-specific schemas
+- map destinations under an allowed root and resolve symlinks safely
+- persist atomically and make save handling idempotent
+- authorize any later MCP or script execution separately
+- use shared transactional storage if approvals span multiple workers
 
-This library is a confirmation contract, **not** authentication, package discovery, an SSRF guard, a sandbox, a filesystem jail, a code verifier or an immutable audit ledger. It does not verify that a claimed revision exists. The host must fetch safely, pin and retain the exact downloaded bytes before preview, validate package schemas, and keep external instructions separate from application authority. Do not refetch mutable remote content after approval.
+Approvals are process-local. Restarting the gate requires a new preview; persisted audit records must never recreate live permission.
 
-Portable relative destinations reject common traversal and Windows device names, but the host must map them under its own allowed root, resolve symlinks safely, use atomic storage and make the callback idempotent. The callback is trusted code and must not execute shell commands or activate the saved MCP configuration.
+## Tests
 
-Approval records are process-local. Restarting loses all approvals, which requires a new preview. Terminal entries are retired when another preview is created; this is not a history database. For multiple workers, put requests on one owner or implement transactional shared storage before using this contract across processes. Persisted confirmation audit records alone must never recreate a live permission.
+```sh
+node --test
+```
 
-No test performs a model call, network request, package install, email operation or tool command. Synthetic fixtures cover content/credential changes, duplicate confirmation, audit/save failure, expiry during persistence, cancellation, input bounds, path validation, redaction and CLI preview behavior.
+Tests use synthetic local fixtures and do not perform network requests, model calls, package installation, or tool execution.
 
-## Origin
+## License
 
-Extracted from TAgent's separation of Skill/MCP discovery, import preview and explicit approvals. This standalone implementation has no TAgent runtime dependency. See [NOTICE](./NOTICE) for provenance and [LICENSE](./LICENSE) for the MIT license; this license does not relicense imported third-party packages or the rest of TAgent.
+MIT. This package was extracted from TAgent's separation of discovery, import preview, explicit confirmation, and execution authorization. See [NOTICE](./NOTICE) for provenance.
