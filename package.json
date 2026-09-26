@@ -10,6 +10,6 @@
   "engines": { "node": ">=22" },
   "exports": { ".": { "types": "./src/index.d.ts", "import": "./src/index.js" } },
   "bin": { "approval-first-import": "./bin/approval-first-import.js" },
-  "files": ["src/", "bin/", "examples/", "README.md", "LICENSE", "NOTICE"],
-  "scripts": { "test": "node --test", "demo": "node bin/approval-first-import.js demo" }
+  "files": ["src/", "bin/", "examples/", "docs/host-integration.md", "README.md", "README_EN.md", "LICENSE", "NOTICE"],
+  "scripts": { "test": "node --test", "demo": "node bin/approval-first-import.js demo", "demo:host": "node examples/host-demo.js" }
 }

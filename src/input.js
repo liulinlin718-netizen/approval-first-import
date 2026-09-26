@@ -55,6 +55,27 @@ function keysOnly(value, allowed) {
   if (!value || Array.isArray(value) || typeof value !== 'object' || Object.keys(value).some(key => !allowed.includes(key)))
     fail('invalid_input', 'Unsupported fields in import input.');
 }
+
+/** Metadata has its own small contract; the candidate is normalized exactly once later. */
+export function confirmationInput(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)
+    || ![null, Object.prototype].includes(Object.getPrototypeOf(request))) fail('invalid_input', 'Confirmation must be a plain object.');
+  const fields = ['previewId', 'fingerprint', 'scope', 'confirmed', 'acknowledgeHighRisk', 'candidate'];
+  const keys = Reflect.ownKeys(request), result = Object.create(null);
+  if (keys.length > fields.length) fail('invalid_input', 'Unsupported confirmation fields.');
+  for (const key of keys) {
+    if (typeof key !== 'string' || !fields.includes(key)) fail('invalid_input', 'Unsupported confirmation fields.');
+    const descriptor = Object.getOwnPropertyDescriptor(request, key);
+    if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) fail('invalid_input', 'Confirmation accessors are unsupported.');
+    result[key] = descriptor.value;
+  }
+  if (!text(result.previewId, 36) || !/^[a-f0-9-]{36}$/.test(result.previewId)
+    || typeof result.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(result.fingerprint)
+    || !text(result.scope, 160) || typeof result.confirmed !== 'boolean'
+    || (result.acknowledgeHighRisk !== undefined && typeof result.acknowledgeHighRisk !== 'boolean'))
+    fail('invalid_input', 'Confirmation metadata is invalid.');
+  return result;
+}
 export function relativePath(value) {
   return text(value, 240) && !/[\\:*?"<>|\r\n]/.test(value) && value.split('/').every(part =>
     part && part !== '.' && part !== '..' && !/[. ]$/.test(part) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part));
@@ -97,6 +118,15 @@ export function normalizeCandidate(input) {
     const key = file.path.normalize('NFC').toLowerCase();
     if (paths.has(key)) fail('invalid_input', 'File paths collide on a case-insensitive filesystem.');
     paths.add(key);
+  }
+  const orderedPaths = [...paths];
+  for (let index = 0; index < orderedPaths.length; index++) {
+    const path = orderedPaths[index]; let slash = path.indexOf('/');
+    while (slash !== -1) {
+      const ancestor = path.slice(0, slash);
+      if (paths.has(ancestor)) fail('path_conflict', `File entries ${orderedPaths.indexOf(ancestor) + 1} and ${index + 1} require a path to be both a file and a directory.`);
+      slash = path.indexOf('/', slash + 1);
+    }
   }
   const normalizedCommands = commands.map(command => {
     keysOnly(command, ['executable', 'args']);

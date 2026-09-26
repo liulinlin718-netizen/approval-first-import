@@ -22,21 +22,29 @@ Approval-First Import 把这些边界固化为宿主应用可复用的状态机�
 ## 安全流程
 
 ```mermaid
-flowchart LR
-    A[发现候选] --> B[宿主安全抓取并固定内容]
-    B --> C[脱敏预览与风险扫描]
-    C --> D{用户明确确认}
-    D -->|拒绝 / 过期| E[不写入]
-    D -->|同意| F[核对内容、作用域与指纹]
-    F --> G[宿主原子保存]
-    G -. 独立授权 .-> H[后续执行]
+flowchart TD
+    A["搜索结果 / URL 候选"] --> B["宿主：安全获取并固定原稿"]
+    B --> C["本库：脱敏预览 + 指纹 + 风险提示"]
+    C --> D{"用户明确同意？"}
+    D -->|拒绝或过期| E["结束：不调用保存"]
+    D -->|同意| F["本库：核对内容、身份作用域和有效期"]
+    F --> G["宿主：原子保存配置与回执"]
+    G -. 独立授权 .-> H["宿主：后续执行或激活"]
+    classDef host fill:#f1f5f9,stroke:#64748b,color:#0f172a
+    classDef gate fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
+    classDef consent fill:#fff7ed,stroke:#c2410c,color:#7c2d12
+    classDef result fill:#ecfdf5,stroke:#047857,color:#064e3b
+    class A,B,H host
+    class C,F gate
+    class D consent
+    class E,G result
 ```
 
 执行始终是单独的操作和授权，本库不会运行外部命令。
 
 ## 快速开始
 
-要求 Node.js 22 或更高版本。无需安装依赖、配置模型密钥、访问网络或构建。
+要求 Node.js 22 或更高版本。取得仓库后，运行示例无需安装依赖、配置模型密钥、访问网络或构建。
 
 ```bash
 git clone https://github.com/liulinlin718-netizen/approval-first-import.git
@@ -48,6 +56,47 @@ node bin/approval-first-import.js preview examples/mcp-high-risk.json
 ```
 
 CLI 只输出预览，不提供保存、安装、确认或 shell 命令。完整确认流程应集成在可信后端中。
+
+## 看一次完整导入
+
+本库没有图形界面。下面使用[可运行宿主演示](./examples/host-demo.js)展示真实合成输出，不是应用截图。
+
+```bash
+node examples/host-demo.js
+```
+
+该演示在仓库内创建临时存储，完成合成确认和保存后重新读取回执，最后清理自己的文件。它不联网，也不执行配置中声明的命令。
+
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant Host as 宿主应用
+    participant Gate as Approval-First Import
+    participant Store as 配置与回执存储
+    Host->>Gate: 已固定的原始候选 + 身份作用域
+    Gate-->>Host: 脱敏预览、指纹、风险提示
+    Host-->>User: 展示来源、配置与风险
+    User->>Host: 明确确认这份预览
+    Host->>Gate: 预览标识 + 当前原稿 + 同意项
+    Gate->>Store: 经宿主回调记录审计并保存
+    Store-->>Host: 保存回执，目标版本 1
+    Note over Host,Store: 若响应丢失，查询回执，不重放保存
+    Host->>Store: 查询 previewId
+    Store-->>Host: 同一个已保存结果
+```
+
+演示输出中的关键字段如下；随机标识、指纹和时间戳未在表中展开：
+
+| 阶段 | 输出字段 | 实际值 | 含义 |
+| --- | --- | --- | --- |
+| 预览 | `preview.candidate.name` | `Synthetic notes` | 合成 MCP 配置 |
+| 预览 | `preview.candidate.env.NOTES_TOKEN` | `[REDACTED]` | 原始凭据不进入公开视图 |
+| 预览 | `preview.requiresConfirmation` | `true` | 保存前需要明确同意 |
+| 预览 | `preview.willWrite` / `preview.willExecute` | `false` / `false` | 预览不写入、不执行 |
+| 保存后 | `saved.value.version` | `1` | 宿主保存了第一个配置版本 |
+| 重读存储 | `afterRestart.value.version` | `1` | 查询已有回执，不再次写入 |
+
+用户不同意时，不调用保存；原稿变化、预览过期或风险未确认时，旧预览不能继续授权。接入步骤和生产存储边界见[宿主接入说明](./docs/host-integration.md)。
 
 ## 集成示例
 
@@ -73,7 +122,7 @@ const draft = {
   env: { NOTES_TOKEN: 'user-supplied-value' },
 };
 
-const scope = `${authenticatedUser.id}:${workspace.id}`;
+const scope = JSON.stringify([authenticatedUser.id, workspace.id]);
 const preview = gate.preview(draft, { scope });
 
 // 仅将脱敏预览发送到 UI，原始 draft 留在服务端。
@@ -90,6 +139,8 @@ const receipt = await gate.confirmAndSave({
 ```
 
 身份认证、CSRF 防护、审计存储、内容抓取与原子持久化由宿主应用负责。模型生成的 `confirmed: true` 不代表人类同意。
+
+上面的片段依赖宿主提供的认证、审计和存储服务。可以从[宿主适配器](./examples/host-adapter.js)与[单进程文件存储示例](./examples/host-store.js)了解这些服务如何配合；示例存储不是生产数据库。
 
 ## 安全契约
 
@@ -114,7 +165,7 @@ const receipt = await gate.confirmAndSave({
 | `discoveryCandidate(input)` | 只校验发现元数据，不抓取内容、不构造命令。 |
 | `new ImportApprovalGate(options?)` | 创建有边界的内存审批注册表。 |
 | `gate.preview(candidate, { scope })` | 创建冻结的脱敏预览和内容指纹。 |
-| `gate.confirmAndSave(request, save)` | 核对同意、内容、作用域、有效期和风险确认后调用一次保存。 |
+| `gate.confirmAndSave(request, save, { signal }?)` | 核对同意、内容、作用域、有效期和风险确认后调用一次保存；支持协作式取消。 |
 | `gate.status(previewId, { scope })` | 查询当前审批状态。 |
 | `gate.revoke(previewId, { scope })` | 撤销待确认审批。 |
 
@@ -128,16 +179,22 @@ const receipt = await gate.confirmAndSave({
 
 脱敏是保守防线，不是完整密钥扫描器或恶意代码检测器。导入内容应始终按文本渲染，不能作为可信 HTML。
 
+脱敏只匹配原文，不重复替换占位符。候选上限为 512 KiB，每个脱敏字段上限 256 KiB，完整预览上限 1 MiB；另有扫描工作量限制。超过预算会拒绝预览，不截断成可确认的包。过短的敏感值可能遮住来源或命令文本，预览会明确提示。
+
 ## 状态模型与宿主责任
 
 ```text
 pending → confirming → saving → saved
-   │           │           └→ failed
+   │           │           └→ failed / save_unknown
    │           ├→ expired / revoked / failed
    └→ expired / revoked
 ```
 
 并发确认不能重复调用保存回调。保存失败会消耗审批，因为可能已经发生部分写入；系统不自动重试或回滚。
+
+审计默认最多等待 10 秒，且不超过预览剩余有效期；保存默认最多等待 30 秒，可用 `recordTimeoutMs` / `saveTimeoutMs` 调整。审计超时不会开始保存；保存开始后的超时或取消返回 `save_unknown`，需查询宿主回执，不能当作“确定没写入”。回调收到 `AbortSignal`，但宿主必须配合取消，库不能强制终止阻塞代码或撤销写入。
+
+终态会释放 gate 持有的原始候选，待确认预览也会到期释放；小型终态记录在下次创建预览时清理。调用方持有的视图、回调自行保留的数据和磁盘存储不受此清理控制。
 
 本库不提供身份认证、包发现、SSRF 防护、沙箱、文件系统隔离、业务 schema 校验、不可变审计存储或命令执行。宿主必须固定并保留预览过的字节、限制网络和目标目录、原子保存，并对后续 MCP/脚本执行单独授权。
 

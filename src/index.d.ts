@@ -1,5 +1,5 @@
 export type ImportKind = 'skill' | 'mcp';
-export type ApprovalStatus = 'pending' | 'confirming' | 'saving' | 'saved' | 'failed' | 'expired' | 'revoked';
+export type ApprovalStatus = 'pending' | 'confirming' | 'saving' | 'saved' | 'failed' | 'expired' | 'revoked' | 'save_unknown';
 export interface CommandDescription { executable: string; args?: string[] }
 export interface ImportCandidate {
   kind: ImportKind;
@@ -45,15 +45,20 @@ export interface Confirmation {
 }
 export interface SaveReceipt<T> { readonly previewId: string; readonly fingerprint: string; readonly status: 'saved'; readonly willExecute: false; readonly value: T }
 export class ApprovalError extends Error { readonly code: string; constructor(code: string, message: string) }
+/** Cooperative cancellation only; this cannot undo a write or terminate host code. */
+export interface CallbackContext { readonly signal: AbortSignal }
 export class ImportApprovalGate {
   constructor(options?: { now?: () => number; ttlMs?: number; maxEntries?: number;
-    /** Host-owned durable audit hook. A failure prevents calling save. */
-    recordDecision?: (decision: DeepReadonly<Decision>) => void | Promise<void> });
+    /** Defaults: audit 10s (also bounded by remaining TTL), save 30s. Range: 1..3600000ms. */
+    recordTimeoutMs?: number; saveTimeoutMs?: number;
+    /** Host-owned audit hook. Failure/timeout prevents save, but may leave an audit record. */
+    recordDecision?: (decision: DeepReadonly<Decision>, context: CallbackContext) => void | Promise<void> });
   preview(candidate: ImportCandidate, context: { scope: string }): DeepReadonly<ImportPreview>;
   status(previewId: string, context: { scope: string }): ApprovalStatus;
   revoke(previewId: string, context: { scope: string }): void;
   confirmAndSave<T>(request: Confirmation,
-    save: (candidate: DeepReadonly<NormalizedCandidate>, decision: DeepReadonly<Decision>) => T | Promise<T>): Promise<SaveReceipt<T>>;
+    save: (candidate: DeepReadonly<NormalizedCandidate>, decision: DeepReadonly<Decision>, context: CallbackContext) => T | Promise<T>,
+    options?: { signal?: AbortSignal }): Promise<SaveReceipt<T>>;
 }
 export function discoveryCandidate(input: { name: string; kind: ImportKind; url: string; provider: string }):
   DeepReadonly<{ name: string; kind: ImportKind; url: string; provider: string; phase: 'discovery' } & PreviewSafety>;

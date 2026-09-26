@@ -1,25 +1,5 @@
 import { freeze, jsonCopy, sourceUrl, text, fail } from './input.js';
-
-const REDACTED = '[REDACTED]';
-const sensitive = /token|password|passwd|secret|api[-_]?key|credential|authorization|cookie|private[-_]?key/i;
-function displayUrl(value) {
-  try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol)) return value;
-    if (url.username || url.password) { url.username = REDACTED; url.password = REDACTED; }
-    for (const key of new Set(url.searchParams.keys())) url.searchParams.set(key, REDACTED);
-    if (url.hash) url.hash = REDACTED;
-    return url.toString();
-  } catch { return value; }
-}
-function scrub(value, known) {
-  let output = value;
-  for (const secret of known) output = output.split(secret).join(REDACTED);
-  output = output.replace(/https?:\/\/[^\s<>"']+/gi, displayUrl);
-  output = output.replace(/\bBearer\s+[^\s,"';]+/gi, `Bearer ${REDACTED}`);
-  output = output.replace(/((?:[\w.-]*(?:token|password|passwd|secret|api[_-]?key|credential|authorization|cookie|private[_-]?key)[\w.-]*)["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi, `$1${REDACTED}`);
-  return output.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/g, '\uFFFD');
-}
+import { REDACTED, sensitive, createRedactor, assertPreviewSize } from './redaction.js';
 
 /** No fetch, draft, command construction or filesystem access happens here. */
 export function discoveryCandidate(input) {
@@ -28,8 +8,19 @@ export function discoveryCandidate(input) {
     || Object.keys(value).some(key => !['name', 'kind', 'url', 'provider'].includes(key))
     || !text(value.name, 120) || !['skill', 'mcp'].includes(value.kind) || !text(value.provider, 80))
     fail('invalid_input', 'Discovery accepts metadata only.');
-  return freeze({ kind: value.kind, name: scrub(value.name, []), provider: scrub(value.provider, []),
-    url: displayUrl(sourceUrl(value.url)), phase: 'discovery', requiresConfirmation: true, willWrite: false, willExecute: false });
+  const clean = createRedactor();
+  return freeze({ kind: value.kind, name: clean(value.name), provider: clean(value.provider),
+    url: clean(sourceUrl(value.url)), phase: 'discovery', requiresConfirmation: true, willWrite: false, willExecute: false });
+}
+
+function credentialValues(candidate) {
+  const values = [...Object.values(candidate.env), ...Object.values(candidate.headers)];
+  for (const command of candidate.commands) for (let index = 0; index < command.args.length; index++) {
+    const arg = command.args[index];
+    if (/^--?/.test(arg) && sensitive.test(arg.split('=')[0]))
+      values.push(arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : command.args[index + 1]);
+  }
+  return [...new Set(values.filter(value => typeof value === 'string' && value))];
 }
 
 export function riskFor(candidate) {
@@ -39,11 +30,19 @@ export function riskFor(candidate) {
   if (!candidate.source.revision) add('mutable-source', 'medium', 'No immutable version/commit was supplied; the host must pin downloaded content.');
   if (candidate.commands.length) add('command-declared', 'medium', 'Commands are descriptions only. Running them requires a separate policy and authorization.');
   if (Object.keys(candidate.env).length || Object.keys(candidate.headers).length) add('credentials', 'medium', 'Environment and header values are hidden. Review names and use your own credentials.');
+  if (credentialValues(candidate).some(value => value.length < 4))
+    add('short-secret', 'medium', 'Short hidden values may also obscure source, command or file text. Review the trusted draft locally; do not infer missing text.');
   const content = [...candidate.files.map(file => file.content), ...candidate.commands.map(command => [command.executable, ...command.args].join(' '))].join('\n');
-  if (/\b(?:curl|wget)\b[^\r\n]*\|\s*(?:sh|bash|zsh|pwsh|powershell)\b/i.test(content))
-    add('remote-script-pipe', 'high', 'Remote content appears to be piped into a shell.');
-  if (/\brm\s+[^\r\n]*-[a-z]*[rf]|\b(?:del\s+\/[sq]|rmdir\s+\/s)|Remove-Item[^\r\n]*-Recurse|\bformat\s+[a-z]:/i.test(content))
-    add('destructive-command', 'high', 'A potentially destructive command was detected.');
+  // Inspect each line once; repeated command words must not trigger quadratic suffix scans.
+  for (const line of content.split(/[\r\n]/)) {
+    const download = line.search(/\b(?:curl|wget)\b/i), remove = line.search(/\brm\s/i), powershell = line.search(/Remove-Item/i);
+    if (download !== -1 && /\|\s*(?:sh|bash|zsh|pwsh|powershell)\b/i.test(line.slice(download)))
+      add('remote-script-pipe', 'high', 'Remote content appears to be piped into a shell.');
+    if ((remove !== -1 && /-[a-z]*[rf]/i.test(line.slice(remove)))
+      || (powershell !== -1 && /-Recurse/i.test(line.slice(powershell)))
+      || /\b(?:del\s+\/[sq]|rmdir\s+\/s)|\bformat\s+[a-z]:/i.test(line))
+      add('destructive-command', 'high', 'A potentially destructive command was detected.');
+  }
   if (/\b(?:sudo|runas)\b|chmod\s+\+x/i.test(content)) add('privilege-change', 'high', 'Privilege or executable-permission changes need additional review.');
   if (/\b(?:postinstall|preinstall|prepare)\b\s*["']?\s*:/i.test(content)) add('lifecycle-script', 'high', 'Package lifecycle scripts may execute during installation.');
   if (candidate.commands.some(command => /(?:^|[\\/])(?:bash|sh|zsh|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh(?:\.exe)?)$/i.test(command.executable)
@@ -61,19 +60,9 @@ export function riskFor(candidate) {
 }
 
 export function publicCandidate(candidate) {
-  const known = [...Object.values(candidate.env), ...Object.values(candidate.headers)].filter(value => typeof value === 'string' && value)
-    .sort((a, b) => b.length - a.length);
-  // Flagged command arguments can contain credentials not duplicated in env.
-  for (const command of candidate.commands) for (let index = 0; index < command.args.length; index++) {
-    const arg = command.args[index];
-    if (/^--?/.test(arg) && sensitive.test(arg.split('=')[0])) {
-      const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : command.args[index + 1];
-      if (value) known.push(value);
-    }
-  }
-  const clean = value => scrub(value, known);
-  return {
-    kind: candidate.kind, name: clean(candidate.name), source: { url: clean(displayUrl(candidate.source.url)),
+  const clean = createRedactor(credentialValues(candidate));
+  const result = {
+    kind: candidate.kind, name: clean(candidate.name), source: { url: clean(candidate.source.url),
       ...(candidate.source.revision ? { revision: clean(candidate.source.revision) } : {}) },
     destination: clean(candidate.destination),
     files: candidate.files.map(file => ({ path: clean(file.path), content: /(?:^|\/)(?:\.env(?:\..*)?|id_rsa|credentials(?:\..*)?)$/i.test(file.path)
@@ -81,6 +70,8 @@ export function publicCandidate(candidate) {
     commands: candidate.commands.map(command => ({ executable: clean(command.executable), args: command.args.map(clean) })),
     env: Object.fromEntries(Object.entries(candidate.env).map(([key, value]) => [key, value === null || value === '' ? '[REQUIRED]' : REDACTED])),
     headers: Object.fromEntries(Object.entries(candidate.headers).map(([key, value]) => [key, value === null || value === '' ? '[REQUIRED]' : REDACTED])),
-    ...(candidate.transport ? { transport: candidate.transport } : {}), ...(candidate.endpoint ? { endpoint: clean(displayUrl(candidate.endpoint)) } : {}),
+    ...(candidate.transport ? { transport: candidate.transport } : {}), ...(candidate.endpoint ? { endpoint: clean(candidate.endpoint) } : {}),
   };
+  assertPreviewSize(result);
+  return result;
 }
